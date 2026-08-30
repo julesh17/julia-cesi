@@ -1,15 +1,22 @@
 import { generateText } from 'ai';
 import { NextRequest } from 'next/server';
+import { buildContinuityResponse } from '@/lib/fallback';
 import { buildSystemPrompt, buildUserPrompt } from '@/lib/prompts';
 import type { Audience, JuliaAction, ProjectType, Specialty } from '@/lib/types';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-const FREE_MODELS = [
-  'inclusionai/ling-3.0-flash-free',
+// Modèles actuellement proposés gratuitement par Vercel AI Gateway.
+// Le Gateway gère lui-même le passage d'un modèle au suivant si le premier
+// n'est pas disponible. Le référentiel local prend ensuite le relais si
+// l'ensemble du service IA est indisponible ou si l'authentification Gateway
+// n'est pas active sur le projet Vercel.
+const DEFAULT_PRIMARY_MODEL = 'minimax/minimax-m2.7-free';
+const FREE_FALLBACK_MODELS = [
   'inclusionai/ling-3.0-tiny-free',
   'poolside/laguna-s-2.1-free',
+  'inclusionai/ling-3.0-flash-free',
 ];
 
 const PROJECT_TYPES: ProjectType[] = ['memoire', 'ads', 'pfe'];
@@ -27,81 +34,83 @@ function cleanText(value: unknown, max: number) {
 }
 
 export async function POST(request: NextRequest) {
+  let body: unknown;
+
   try {
-    const body = await request.json();
-    const action = body?.action;
-    const projectType = body?.projectType;
-    const specialty = body?.specialty;
-    const audience = body?.audience;
-    const text = cleanText(body?.text, 12000);
-    const previousAnalysis = cleanText(body?.previousAnalysis, 12000);
-    const question = cleanText(body?.question, 3000);
+    body = await request.json();
+  } catch {
+    return Response.json({ error: 'Requête invalide.' }, { status: 400 });
+  }
 
-    if (!isOneOf(action, ACTIONS) || !isOneOf(projectType, PROJECT_TYPES) || !isOneOf(specialty, SPECIALTIES) || !isOneOf(audience, AUDIENCES)) {
-      return Response.json({ error: 'Paramètres de requête invalides.' }, { status: 400 });
-    }
+  const payload = body as Record<string, unknown>;
+  const action = payload?.action;
+  const projectType = payload?.projectType;
+  const specialty = payload?.specialty;
+  const audience = payload?.audience;
+  const text = cleanText(payload?.text, 12000);
+  const previousAnalysis = cleanText(payload?.previousAnalysis, 12000);
+  const question = cleanText(payload?.question, 3000);
 
-    if (text.length < 30) {
-      return Response.json({ error: 'Décrivez le projet avec un peu plus de précision avant de demander un avis.' }, { status: 400 });
-    }
+  if (!isOneOf(action, ACTIONS) || !isOneOf(projectType, PROJECT_TYPES) || !isOneOf(specialty, SPECIALTIES) || !isOneOf(audience, AUDIENCES)) {
+    return Response.json({ error: 'Paramètres de requête invalides.' }, { status: 400 });
+  }
 
-    if (action === 'chat' && question.length < 3) {
-      return Response.json({ error: 'Écrivez une question de suivi.' }, { status: 400 });
-    }
+  if (text.length < 30) {
+    return Response.json({ error: 'Décrivez le projet avec un peu plus de précision avant de demander un avis.' }, { status: 400 });
+  }
 
+  if (action === 'chat' && question.length < 3) {
+    return Response.json({ error: 'Écrivez une question de suivi.' }, { status: 400 });
+  }
+
+  const fallbackInput = {
+    action,
+    projectType,
+    specialty,
+    audience,
+    text,
+    previousAnalysis,
+    question,
+  };
+
+  try {
     const system = buildSystemPrompt(projectType, specialty);
-    const prompt = buildUserPrompt({
-      action,
-      projectType,
-      specialty,
-      audience,
-      text,
-      previousAnalysis,
-      question,
+    const prompt = buildUserPrompt(fallbackInput);
+    const primaryModel = process.env.JULIA_MODEL?.trim() || DEFAULT_PRIMARY_MODEL;
+    const fallbackModels = FREE_FALLBACK_MODELS.filter((model) => model !== primaryModel);
+
+    const result = await generateText({
+      model: primaryModel,
+      system,
+      prompt,
+      temperature: 0.25,
+      maxOutputTokens: action === 'analyze' ? 1800 : 1300,
+      maxRetries: 2,
+      timeout: 52000,
+      providerOptions: {
+        gateway: {
+          models: fallbackModels,
+        },
+      },
     });
 
-    // Par défaut Julia n'utilise que des modèles annoncés gratuits dans AI Gateway.
-    // JULIA_MODEL est volontairement optionnel : le propriétaire peut remplacer le modèle
-    // plus tard depuis les variables d'environnement Vercel, sans modifier le code.
-    const models = process.env.JULIA_MODEL
-      ? [process.env.JULIA_MODEL]
-      : FREE_MODELS;
-
-    let lastError: unknown = null;
-
-    for (const model of models) {
-      try {
-        const result = await generateText({
-          model,
-          system,
-          prompt,
-          temperature: 0.25,
-          maxOutputTokens: action === 'analyze' ? 1800 : 1300,
-          maxRetries: 1,
-          timeout: 45000,
-        });
-
-        if (result.text?.trim()) {
-          return Response.json({ text: result.text.trim(), model });
-        }
-      } catch (error) {
-        lastError = error;
-        console.error(`[Julia] Échec du modèle ${model}:`, error);
-      }
+    if (result.text?.trim()) {
+      return Response.json({
+        text: result.text.trim(),
+        model: primaryModel,
+        fallback: false,
+      });
     }
-
-    console.error('[Julia] Tous les modèles ont échoué:', lastError);
-    return Response.json(
-      {
-        error: "Julia n'arrive pas à joindre un modèle gratuit pour le moment. Réessayez dans quelques instants.",
-      },
-      { status: 503 },
-    );
   } catch (error) {
-    console.error('[Julia] Erreur API:', error);
-    return Response.json(
-      { error: "Une erreur inattendue s'est produite. Réessayez dans quelques instants." },
-      { status: 500 },
-    );
+    console.error('[Julia] AI Gateway indisponible, bascule vers le référentiel local :', error);
   }
+
+  // Continuité de service : aucune dépendance externe, aucun crédit et aucune
+  // clé ne sont nécessaires pour ce mode. L'utilisateur reçoit toujours un
+  // retour pédagogique exploitable au lieu d'une erreur 503.
+  return Response.json({
+    text: buildContinuityResponse(fallbackInput),
+    model: 'julia-local-reference',
+    fallback: true,
+  });
 }
