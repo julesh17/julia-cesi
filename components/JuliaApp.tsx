@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import { SimpleMarkdown } from './SimpleMarkdown';
+import { buildContinuityResponse } from '@/lib/fallback';
 import type { Audience, JuliaAction, ProjectType, Specialty } from '@/lib/types';
 
 const CESI_LOGO = 'https://raw.githubusercontent.com/julesh17/cesi-edt/refs/heads/main/static/cesi.png';
@@ -85,8 +86,17 @@ export default function JuliaApp() {
         }),
       });
 
-      const data = await response.json();
-      if (!response.ok) throw new Error(data?.error || "Julia n'a pas pu répondre.");
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        if (response.status < 500) {
+          setError(data?.error || "La demande n'est pas complète.");
+          return;
+        }
+        throw new Error('server-unavailable');
+      }
+      if (typeof data?.text !== 'string' || !data.text.trim()) {
+        throw new Error('server-unavailable');
+      }
 
       const title = action === 'analyze'
         ? 'Analyse du sujet'
@@ -103,8 +113,35 @@ export default function JuliaApp() {
       requestAnimationFrame(() => {
         document.getElementById('julia-responses')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Julia n'a pas pu répondre.");
+    } catch {
+      // Si la Function Vercel, AI Gateway ou le réseau est momentanément
+      // indisponible, Julia continue directement dans le navigateur grâce
+      // au même référentiel pédagogique déterministe que le serveur.
+      const title = action === 'analyze'
+        ? 'Analyse du sujet'
+        : action === 'chat'
+          ? customQuestion!.trim()
+          : actionLabels[action].title;
+
+      const localText = buildContinuityResponse({
+        action,
+        projectType,
+        specialty,
+        audience,
+        text: text.trim(),
+        previousAnalysis: initialAnalysis,
+        question: customQuestion?.trim(),
+      });
+
+      setResponses((current) => [
+        ...current,
+        { id: Date.now(), title, text: localText },
+      ]);
+      if (action === 'chat') setQuestion('');
+
+      requestAnimationFrame(() => {
+        document.getElementById('julia-responses')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
     } finally {
       setLoading(null);
     }
