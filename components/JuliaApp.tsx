@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from 'react';
 import { SimpleMarkdown } from './SimpleMarkdown';
-import { buildContinuityResponse } from '@/lib/fallback';
 import type { Audience, JuliaAction, ProjectType, Specialty } from '@/lib/types';
 
 const CESI_LOGO = 'https://raw.githubusercontent.com/julesh17/cesi-edt/refs/heads/main/static/cesi.png';
@@ -72,30 +71,51 @@ export default function JuliaApp() {
 
     setLoading(action);
     try {
-      const response = await fetch('/api/julia', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          projectType,
-          specialty,
-          audience,
-          text: text.trim(),
-          previousAnalysis: initialAnalysis,
-          question: customQuestion?.trim(),
-        }),
-      });
+      const payload = {
+        action,
+        projectType,
+        specialty,
+        audience,
+        text: text.trim(),
+        previousAnalysis: initialAnalysis,
+        question: customQuestion?.trim(),
+      };
 
-      const data = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        if (response.status < 500) {
-          setError(data?.error || "La demande n'est pas complète.");
-          return;
+      // Une seconde tentative côté navigateur absorbe aussi un redéploiement Vercel,
+      // une Function momentanément froide ou une coupure réseau très brève.
+      let data: any = null;
+      let lastStatus = 0;
+
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const response = await fetch('/api/julia', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+
+          lastStatus = response.status;
+          data = await response.json().catch(() => ({}));
+
+          if (response.ok && typeof data?.text === 'string' && data.text.trim()) {
+            break;
+          }
+
+          if (response.status < 500) {
+            setError(data?.error || "La demande n'est pas complète.");
+            return;
+          }
+        } catch {
+          lastStatus = 0;
         }
-        throw new Error('server-unavailable');
+
+        if (attempt === 0) {
+          await new Promise((resolve) => setTimeout(resolve, 900));
+        }
       }
+
       if (typeof data?.text !== 'string' || !data.text.trim()) {
-        throw new Error('server-unavailable');
+        throw new Error(`server-unavailable-${lastStatus}`);
       }
 
       const title = action === 'analyze'
@@ -114,34 +134,9 @@ export default function JuliaApp() {
         document.getElementById('julia-responses')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
     } catch {
-      // Si la Function Vercel, AI Gateway ou le réseau est momentanément
-      // indisponible, Julia continue directement dans le navigateur grâce
-      // au même référentiel pédagogique déterministe que le serveur.
-      const title = action === 'analyze'
-        ? 'Analyse du sujet'
-        : action === 'chat'
-          ? customQuestion!.trim()
-          : actionLabels[action].title;
-
-      const localText = buildContinuityResponse({
-        action,
-        projectType,
-        specialty,
-        audience,
-        text: text.trim(),
-        previousAnalysis: initialAnalysis,
-        question: customQuestion?.trim(),
-      });
-
-      setResponses((current) => [
-        ...current,
-        { id: Date.now(), title, text: localText },
-      ]);
-      if (action === 'chat') setQuestion('');
-
-      requestAnimationFrame(() => {
-        document.getElementById('julia-responses')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
+      setError(
+        "Julia a essayé plusieurs services d'IA sans obtenir de réponse. Vous pouvez relancer : Gemini, Groq puis le service de secours seront retentés automatiquement.",
+      );
     } finally {
       setLoading(null);
     }
