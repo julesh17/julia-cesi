@@ -3,7 +3,7 @@ import './globals.css';
 
 export const metadata: Metadata = {
   title: 'Julia — Cadrage des projets ingénieur',
-  description: "Julia aide à cadrer un mémoire technique, une ADS ou un PFE avant l'échange avec l'équipe pédagogique.",
+  description: "Julia aide à cadrer un mémoire technique, un projet ADS ou un PFE avant l'échange avec l'équipe pédagogique.",
 };
 
 export const viewport: Viewport = {

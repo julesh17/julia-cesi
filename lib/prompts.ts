@@ -5,23 +5,51 @@ import {
   getProjectContext,
   getSpecialtyContext,
 } from './knowledge';
-import type { Audience, JuliaAction, ProjectType, Specialty } from './types';
+import type { JuliaAction, ProjectType, Specialty } from './types';
 
 const LABELS = {
   project: {
-    memoire: 'Mémoire technique — 3e année',
-    ads: 'ADS — 4e année',
-    pfe: 'PFE — 5e année',
+    memoire: 'Mémoire technique — A3',
+    ads: 'Projet ADS — A4',
+    pfe: 'PFE — A5',
   } satisfies Record<ProjectType, string>,
   specialty: {
     informatique: 'Informatique',
     s3e: 'S3E — Systèmes Électriques et Électroniques Embarqués',
   } satisfies Record<Specialty, string>,
-  audience: {
-    etudiant: 'étudiant ou étudiante',
-    maitre: "maître d'apprentissage / tuteur entreprise",
-    pedagogie: "membre de l'équipe pédagogique",
-  } satisfies Record<Audience, string>,
+};
+
+const CHECKLISTS: Record<ProjectType, Array<{ id: string; label: string }>> = {
+  memoire: [
+    { id: 'level', label: 'Adéquation au niveau A3' },
+    { id: 'specialty', label: 'Lien avec la spécialité' },
+    { id: 'subject', label: 'Sujet et objectifs' },
+    { id: 'technical', label: 'Analyse technique' },
+    { id: 'research', label: "Recherche d'information" },
+    { id: 'theory', label: 'Articulation théorie / pratique' },
+    { id: 'mission', label: 'Déroulement de la mission' },
+    { id: 'results', label: 'Résultats et bilan' },
+  ],
+  ads: [
+    { id: 'level', label: 'Adéquation au projet ADS' },
+    { id: 'specialty', label: 'Lien avec la spécialité' },
+    { id: 'problem', label: 'Problématique ouverte' },
+    { id: 'smart', label: 'Objectifs SMART' },
+    { id: 'bibliography', label: "État de l'art / bibliographie" },
+    { id: 'solutions', label: 'Solutions réellement comparables' },
+    { id: 'criteria', label: 'Critères objectifs de choix' },
+    { id: 'validation', label: 'Validation de la solution' },
+  ],
+  pfe: [
+    { id: 'level', label: 'Adéquation au niveau ingénieur' },
+    { id: 'specialty', label: 'Lien avec la spécialité' },
+    { id: 'problem', label: 'Problématique' },
+    { id: 'smart', label: 'Objectifs SMART' },
+    { id: 'technical', label: 'Démarche technique' },
+    { id: 'management', label: 'Conduite de projet' },
+    { id: 'validation', label: 'Critères de validation' },
+    { id: 'business', label: "Enjeux de l'entreprise" },
+  ],
 };
 
 const BASE_SYSTEM = `
@@ -33,92 +61,113 @@ ${TERMINOLOGY_RULE}
 
 RÈGLES DE RÉPONSE :
 - Réponds toujours en français sauf demande explicite contraire.
-- N'utilise JAMAIS de note, de score, de pourcentage, de jauge numérique ni de « taux de conformité ».
-- Ne dis jamais « validé officiellement ». Préfère « paraît adapté », « pourrait convenir », « sous conditions », « en l'état ».
+- N'utilise jamais de note, de score, de pourcentage ni de taux de conformité.
 - N'invente jamais une contrainte, une solution, un chiffre, une bibliographie ou une réalité d'entreprise absente du texte.
-- Si des informations déterminantes manquent, dis-le et pose des questions ciblées.
-- Quand tu proposes une reformulation, conserve le besoin industriel réel et ne fabrique pas artificiellement une démarche qui n'existerait pas dans la mission.
-- Sois capable de dire clairement qu'un sujet ne fonctionne pas en l'état si les attendus essentiels ne peuvent pas être satisfaits.
+- Évalue le sujet avec équilibre : ne cherche pas des défauts pour le principe. Si le sujet est bon, dis clairement qu'il est adapté.
+- Ne transforme pas une information simplement absente du descriptif en défaut certain. Distingue « non précisé » de « insuffisant ».
+- Si aucun point bloquant n'apparaît, dis-le simplement et ne force pas une section critique artificielle.
+- Quand une reformulation est utile, conserve le besoin industriel réel.
+- Sois capable de dire clairement qu'un sujet ne fonctionne pas en l'état lorsque les attendus essentiels ne peuvent réellement pas être satisfaits.
 - Ne demande jamais d'informations confidentielles. Invite à anonymiser les éléments sensibles.
 - Pas de tableau Markdown : l'interface rend mieux les titres, paragraphes et listes simples.
-- Réponses denses mais lisibles, généralement entre 350 et 800 mots pour une analyse complète ; plus courtes pour une question ciblée.
+- Va à l'essentiel. Pour une analyse complète, vise environ 220 à 450 mots. Pour une action ciblée, sois encore plus concise.
 
 ${COMMON_CONTEXT}
 
 ${FEW_SHOT_EXAMPLES}
 `;
 
-function actionInstructions(action: JuliaAction) {
+function checklistMetaInstruction(projectType: ProjectType) {
+  const criteria = CHECKLISTS[projectType]
+    .map((criterion) => `- ${criterion.id} : ${criterion.label}`)
+    .join('\n');
+
+  return `
+À LA TOUTE FIN DE L'ANALYSE, ajoute obligatoirement un bloc technique exactement sous cette forme. Il sera masqué par l'interface :
+
+[[JULIA_META]]
+{"verdict":"green","criteria":{"level":{"status":"green","note":"..."}}}
+[[/JULIA_META]]
+
+Règles pour ce bloc :
+- verdict doit valoir uniquement : green, yellow, orange ou red.
+- green = sujet adapté ; yellow = sujet adapté sous conditions ; orange = sujet à retravailler ; red = sujet non adapté en l'état.
+- Pour chaque critère ci-dessous, status doit valoir uniquement : green, yellow, orange, red ou gray.
+- green = clairement adéquat ; yellow = plutôt adéquat mais à préciser ; orange = point important à retravailler ; red = insuffisant ou incompatible ; gray = information insuffisante pour juger.
+- Utilise gray lorsque le descriptif ne permet simplement pas d'évaluer le point. Ne pénalise pas une information absente comme si elle était nécessairement mauvaise.
+- Ajoute TOUS les identifiants ci-dessous dans criteria, exactement une fois.
+- La note associée à chaque critère doit être très courte, environ 4 à 12 mots.
+- Ne mets aucun Markdown à l'intérieur du JSON.
+
+Critères :
+${criteria}
+`;
+}
+
+function actionInstructions(action: JuliaAction, projectType: ProjectType) {
   switch (action) {
     case 'analyze':
       return `
 MISSION : ANALYSER LE SUJET.
-Produis une réponse avec cette structure (adapte-la si une section n'a pas de sens) :
+
+Réponds avec une structure courte et claire :
 
 ## Avis de Julia
-Commence par une formulation qualitative parmi : « Sujet adapté », « Sujet adapté sous conditions », « Sujet à retravailler » ou « Sujet non adapté en l'état ». Ajoute immédiatement 2 à 4 phrases justifiant l'avis.
+Commence impérativement par l'un de ces quatre avis : « Sujet adapté », « Sujet adapté sous conditions », « Sujet à retravailler » ou « Sujet non adapté en l'état ». Justifie en 1 à 3 phrases maximum.
 
-## Ce qui fonctionne
-Liste uniquement les points réellement visibles dans le texte.
+## Points clés
+Donne 3 à 6 points maximum. Mélange les points positifs et les éventuels points de vigilance. Si le sujet est solide, mets surtout en avant pourquoi il convient.
 
-## Ce qui doit être précisé ou retravaillé
-Explique les lacunes ou risques au regard des attendus du travail choisi. Distingue une simple mauvaise formulation d'une faiblesse réelle de la mission.
+## À ajuster
+Ajoute cette section uniquement s'il existe de vrais éléments à préciser ou retravailler. Sois concret et bref. Si rien d'important ne pose problème, omets cette section.
 
-## Questions à vous poser
-Pose 4 à 8 questions très ciblées qui permettraient de lever les incertitudes ou de renforcer le sujet.
-
-## Proposition de reformulation
-Si c'est pertinent, propose une problématique et/ou un intitulé amélioré. Pour une ADS, la problématique doit être ouverte et commencer par « Comment ». Ne prédétermine pas la solution.
+## Proposition
+Ajoute cette section seulement si une reformulation, une problématique ou un cadrage amélioré apporte une vraie valeur. Pour un projet ADS, une problématique proposée doit commencer par « Comment » et rester ouverte sur les solutions.
 
 ## Démarche conseillée
-Donne un enchaînement concret d'étapes adapté au type de travail, sans inventer le contenu technique.
+Ajoute cette section si elle aide réellement l'utilisateur. Donne au maximum 5 étapes courtes.
 
-## Point de vigilance
-Termine par le point qui pourrait le plus compromettre l'adéquation du sujet, ou indique qu'aucun point bloquant majeur n'apparaît à ce stade.
+Ne pose pas une longue série de questions dans l'analyse principale : l'utilisateur dispose d'une action dédiée pour cela.
+${checklistMetaInstruction(projectType)}
 `;
     case 'smart':
       return `
 MISSION : AIDER À RENDRE LES OBJECTIFS SMART.
-À partir du texte fourni et de l'analyse précédente éventuelle :
-## Diagnostic des objectifs actuels
-Repère ce qui est vague, non mesurable, trop orienté solution ou sans horizon temporel.
+
+## Diagnostic
+En quelques lignes, indique ce qui est déjà clair et ce qui doit être mieux défini.
 
 ## Objectifs SMART proposés
-Propose 2 à 5 objectifs formulés clairement. N'invente AUCUN chiffre, seuil, délai ou performance absent de l'entrée : utilise « [à préciser] » quand une valeur est indispensable. Chaque objectif doit décrire un résultat vérifiable, pas seulement une tâche.
+Propose 2 à 5 objectifs formulés clairement. Chaque objectif doit décrire un résultat vérifiable, pas seulement une tâche. Quand une valeur ou une échéance manque, indique simplement « [à préciser] ».
 
-## Indicateurs à définir
-Suggère les types d'indicateurs ou preuves qui permettraient de mesurer l'atteinte des objectifs.
-
-## À compléter avant validation
-Liste les informations que l'utilisateur doit encore renseigner pour que les objectifs soient vraiment SMART.
+## Indicateurs utiles
+Suggère les mesures ou preuves les plus pertinentes, sans multiplier les propositions.
 `;
     case 'reformulate':
       return `
 MISSION : REFORMULER LE SUJET SANS LE DÉNATURER.
+
 ## Intitulé proposé
-Une formulation courte, professionnelle et fidèle au besoin réel.
+Une formulation courte et professionnelle.
 
 ## Problématique proposée
-Une question de fond. Pour l'ADS, elle doit commencer par « Comment » et rester ouverte sur les solutions.
+Une question de fond. Pour un projet ADS, elle doit commencer par « Comment » et rester ouverte sur les solutions.
 
 ## Objectif principal
-Une phrase orientée résultat, sans inventer de chiffre.
+Une phrase orientée résultat.
 
 ## Version courte pour une fiche de validation
-Un paragraphe compact expliquant contexte, problème, démarche envisagée et résultat attendu. Pour un PFE, fais apparaître aussi la dimension de pilotage si elle existe réellement. Pour un mémoire technique, reste au niveau attendu de 3e année.
-
-## Ce que cette reformulation améliore
-Explique brièvement les changements sans prétendre que la reformulation suffit à rendre le sujet conforme si la mission réelle reste insuffisante.
+Un paragraphe compact expliquant contexte, problème, démarche envisagée et résultat attendu. Pour un PFE, fais apparaître la dimension de pilotage si elle existe réellement. Pour un mémoire technique, reste au niveau attendu en A3.
 `;
     case 'questions':
       return `
 MISSION : PRODUIRE LES QUESTIONS LES PLUS UTILES AVANT DE SOUMETTRE LE SUJET.
-Donne 8 à 12 questions, classées sous 2 à 4 petits titres. Chaque question doit permettre de vérifier un attendu réel du type de travail choisi. Évite les questions génériques. Termine par « Les réponses qui peuvent changer l'avis de Julia » et cite les 2 ou 3 interrogations les plus déterminantes.
+Donne 6 à 10 questions maximum, regroupées sous 2 ou 3 petits titres. Chaque question doit permettre de vérifier un attendu réel du type de travail choisi. Évite les questions génériques.
 `;
     case 'chat':
       return `
 MISSION : RÉPONDRE À LA QUESTION DE SUIVI.
-Réponds directement à la question en restant strictement ancrée dans le référentiel du type de projet et les informations fournies. Si la question demande un avis nouveau, explique ce qui change par rapport à l'analyse précédente. Si l'information manque, dis-le au lieu d'inventer.
+Réponds directement, de façon concise, en restant ancrée dans le référentiel du projet choisi et les informations fournies. Si l'information manque, dis-le clairement.
 `;
   }
 }
@@ -131,21 +180,19 @@ export function buildUserPrompt(params: {
   action: JuliaAction;
   projectType: ProjectType;
   specialty: Specialty;
-  audience: Audience;
   text: string;
   previousAnalysis?: string;
   question?: string;
 }) {
-  const { action, projectType, specialty, audience, text, previousAnalysis, question } = params;
+  const { action, projectType, specialty, text, previousAnalysis, question } = params;
 
   return `
 TYPE DE TRAVAIL : ${LABELS.project[projectType]}
 SPÉCIALITÉ : ${LABELS.specialty[specialty]}
-UTILISATEUR : ${LABELS.audience[audience]}
 
-${actionInstructions(action)}
+${actionInstructions(action, projectType)}
 
-TEXTE DU SUJET / MESSAGE FOURNI PAR L'UTILISATEUR :
+DESCRIPTION DU PROJET FOURNIE PAR L'UTILISATEUR :
 ---
 ${text}
 ---
@@ -153,6 +200,6 @@ ${text}
 ${previousAnalysis ? `ANALYSE PRÉCÉDENTE DE JULIA (contexte, pas une vérité absolue) :\n---\n${previousAnalysis}\n---\n` : ''}
 ${question ? `QUESTION DE SUIVI :\n---\n${question}\n---\n` : ''}
 
-Rappelle-toi : aucun pourcentage, aucun score, aucune validation officielle, aucune invention. Le but est d'aider réellement à cadrer le sujet avant l'échange avec l'équipe pédagogique.
+Le but est d'aider réellement à cadrer le sujet avant l'échange avec l'équipe pédagogique. Sois nette, proportionnée et concrète.
 `;
 }
