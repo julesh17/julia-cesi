@@ -1,28 +1,44 @@
 import { generateText } from 'ai';
 import { NextRequest } from 'next/server';
-import { buildContinuityResponse } from '@/lib/fallback';
 import { buildSystemPrompt, buildUserPrompt } from '@/lib/prompts';
 import type { Audience, JuliaAction, ProjectType, Specialty } from '@/lib/types';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
 
-// Modèles actuellement proposés gratuitement par Vercel AI Gateway.
-// Le Gateway gère lui-même le passage d'un modèle au suivant si le premier
-// n'est pas disponible. Le référentiel local prend ensuite le relais si
-// l'ensemble du service IA est indisponible ou si l'authentification Gateway
-// n'est pas active sur le projet Vercel.
-const DEFAULT_PRIMARY_MODEL = 'minimax/minimax-m2.7-free';
-const FREE_FALLBACK_MODELS = [
+const PROJECT_TYPES: ProjectType[] = ['memoire', 'ads', 'pfe'];
+const SPECIALTIES: Specialty[] = ['informatique', 's3e'];
+const AUDIENCES: Audience[] = ['etudiant', 'maitre', 'pedagogie'];
+const ACTIONS: JuliaAction[] = ['analyze', 'smart', 'reformulate', 'questions', 'chat'];
+
+// Chaîne de secours indépendante :
+// 1) Gemini API (clé Google AI Studio)
+// 2) Groq API
+// 3) Vercel AI Gateway (si disponible sur le projet)
+// Les clés restent exclusivement côté serveur.
+const GEMINI_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+const GROQ_MODELS = ['qwen/qwen3.8-27b', 'openai/gpt-oss-120b'];
+const GATEWAY_PRIMARY = 'minimax/minimax-m2.7-free';
+const GATEWAY_FALLBACKS = [
   'inclusionai/ling-3.0-tiny-free',
   'poolside/laguna-s-2.1-free',
   'inclusionai/ling-3.0-flash-free',
 ];
 
-const PROJECT_TYPES: ProjectType[] = ['memoire', 'ads', 'pfe'];
-const SPECIALTIES: Specialty[] = ['informatique', 's3e'];
-const AUDIENCES: Audience[] = ['etudiant', 'maitre', 'pedagogie'];
-const ACTIONS: JuliaAction[] = ['analyze', 'smart', 'reformulate', 'questions', 'chat'];
+type ProviderResult = {
+  text: string;
+  provider: 'gemini' | 'groq' | 'vercel-gateway';
+  model: string;
+};
+
+class ProviderError extends Error {
+  status?: number;
+
+  constructor(message: string, status?: number) {
+    super(message);
+    this.status = status;
+  }
+}
 
 function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value is T {
   return typeof value === 'string' && allowed.includes(value as T);
@@ -31,6 +47,164 @@ function isOneOf<T extends string>(value: unknown, allowed: readonly T[]): value
 function cleanText(value: unknown, max: number) {
   if (typeof value !== 'string') return '';
   return value.replace(/\u0000/g, '').trim().slice(0, max);
+}
+
+function outputLimit(action: JuliaAction) {
+  return action === 'analyze' ? 1800 : 1300;
+}
+
+async function fetchJson(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<{ response: Response; data: any }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal });
+    const data = await response.json().catch(() => null);
+    return { response, data };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function callGemini(
+  apiKey: string,
+  system: string,
+  prompt: string,
+  action: JuliaAction,
+): Promise<ProviderResult> {
+  let lastError: unknown;
+
+  for (const model of GEMINI_MODELS) {
+    try {
+      const { response, data } = await fetchJson(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: system }],
+            },
+            contents: [
+              {
+                role: 'user',
+                parts: [{ text: prompt }],
+              },
+            ],
+            generationConfig: {
+              temperature: 0.25,
+              maxOutputTokens: outputLimit(action),
+            },
+          }),
+        },
+        10000,
+      );
+
+      if (!response.ok) {
+        throw new ProviderError(`Gemini ${model}: HTTP ${response.status}`, response.status);
+      }
+
+      const text = data?.candidates?.[0]?.content?.parts
+        ?.map((part: { text?: string }) => part?.text || '')
+        .join('')
+        .trim();
+
+      if (!text) throw new ProviderError(`Gemini ${model}: réponse vide`);
+      return { text, provider: 'gemini', model };
+    } catch (error) {
+      lastError = error;
+      console.warn(`[Julia] Gemini ${model} indisponible :`, error);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Gemini indisponible');
+}
+
+async function callGroq(
+  apiKey: string,
+  system: string,
+  prompt: string,
+  action: JuliaAction,
+): Promise<ProviderResult> {
+  let lastError: unknown;
+
+  for (const model of GROQ_MODELS) {
+    try {
+      const { response, data } = await fetchJson(
+        'https://api.groq.com/openai/v1/chat/completions',
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: system },
+              { role: 'user', content: prompt },
+            ],
+            temperature: 0.25,
+            max_completion_tokens: outputLimit(action),
+          }),
+        },
+        10000,
+      );
+
+      if (!response.ok) {
+        throw new ProviderError(`Groq ${model}: HTTP ${response.status}`, response.status);
+      }
+
+      const text = data?.choices?.[0]?.message?.content?.trim();
+      if (!text) throw new ProviderError(`Groq ${model}: réponse vide`);
+      return { text, provider: 'groq', model };
+    } catch (error) {
+      lastError = error;
+      console.warn(`[Julia] Groq ${model} indisponible :`, error);
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Groq indisponible');
+}
+
+async function callVercelGateway(
+  system: string,
+  prompt: string,
+  action: JuliaAction,
+): Promise<ProviderResult> {
+  const primaryModel = process.env.JULIA_MODEL?.trim() || GATEWAY_PRIMARY;
+  const fallbackModels = GATEWAY_FALLBACKS.filter((model) => model !== primaryModel);
+
+  const result = await generateText({
+    model: primaryModel,
+    system,
+    prompt,
+    temperature: 0.25,
+    maxOutputTokens: outputLimit(action),
+    maxRetries: 1,
+    timeout: 14000,
+    providerOptions: {
+      gateway: {
+        models: fallbackModels,
+      },
+    },
+  });
+
+  const text = result.text?.trim();
+  if (!text) throw new Error('AI Gateway : réponse vide');
+
+  return {
+    text,
+    provider: 'vercel-gateway',
+    model: primaryModel,
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -51,19 +225,27 @@ export async function POST(request: NextRequest) {
   const previousAnalysis = cleanText(payload?.previousAnalysis, 12000);
   const question = cleanText(payload?.question, 3000);
 
-  if (!isOneOf(action, ACTIONS) || !isOneOf(projectType, PROJECT_TYPES) || !isOneOf(specialty, SPECIALTIES) || !isOneOf(audience, AUDIENCES)) {
+  if (
+    !isOneOf(action, ACTIONS) ||
+    !isOneOf(projectType, PROJECT_TYPES) ||
+    !isOneOf(specialty, SPECIALTIES) ||
+    !isOneOf(audience, AUDIENCES)
+  ) {
     return Response.json({ error: 'Paramètres de requête invalides.' }, { status: 400 });
   }
 
   if (text.length < 30) {
-    return Response.json({ error: 'Décrivez le projet avec un peu plus de précision avant de demander un avis.' }, { status: 400 });
+    return Response.json(
+      { error: 'Décrivez le projet avec un peu plus de précision avant de demander un avis.' },
+      { status: 400 },
+    );
   }
 
   if (action === 'chat' && question.length < 3) {
     return Response.json({ error: 'Écrivez une question de suivi.' }, { status: 400 });
   }
 
-  const fallbackInput = {
+  const promptInput = {
     action,
     projectType,
     specialty,
@@ -73,44 +255,46 @@ export async function POST(request: NextRequest) {
     question,
   };
 
-  try {
-    const system = buildSystemPrompt(projectType, specialty);
-    const prompt = buildUserPrompt(fallbackInput);
-    const primaryModel = process.env.JULIA_MODEL?.trim() || DEFAULT_PRIMARY_MODEL;
-    const fallbackModels = FREE_FALLBACK_MODELS.filter((model) => model !== primaryModel);
+  const system = buildSystemPrompt(projectType, specialty);
+  const prompt = buildUserPrompt(promptInput);
+  const failures: string[] = [];
 
-    const result = await generateText({
-      model: primaryModel,
-      system,
-      prompt,
-      temperature: 0.25,
-      maxOutputTokens: action === 'analyze' ? 1800 : 1300,
-      maxRetries: 2,
-      timeout: 52000,
-      providerOptions: {
-        gateway: {
-          models: fallbackModels,
-        },
-      },
-    });
-
-    if (result.text?.trim()) {
-      return Response.json({
-        text: result.text.trim(),
-        model: primaryModel,
-        fallback: false,
-      });
+  // Fournisseur principal : Gemini.
+  // En cas de quota, de timeout ou d'incident : bascule automatique vers Groq,
+  // puis vers les modèles gratuits de Vercel AI Gateway.
+  const geminiKey = process.env.GEMINI_API_KEY?.trim();
+  if (geminiKey) {
+    try {
+      const result = await callGemini(geminiKey, system, prompt, action);
+      return Response.json({ ...result, fallback: false });
+    } catch (error) {
+      failures.push(`gemini:${error instanceof Error ? error.message : 'erreur'}`);
     }
-  } catch (error) {
-    console.error('[Julia] AI Gateway indisponible, bascule vers le référentiel local :', error);
   }
 
-  // Continuité de service : aucune dépendance externe, aucun crédit et aucune
-  // clé ne sont nécessaires pour ce mode. L'utilisateur reçoit toujours un
-  // retour pédagogique exploitable au lieu d'une erreur 503.
-  return Response.json({
-    text: buildContinuityResponse(fallbackInput),
-    model: 'julia-local-reference',
-    fallback: true,
-  });
+  const groqKey = process.env.GROQ_API_KEY?.trim();
+  if (groqKey) {
+    try {
+      const result = await callGroq(groqKey, system, prompt, action);
+      return Response.json({ ...result, fallback: true });
+    } catch (error) {
+      failures.push(`groq:${error instanceof Error ? error.message : 'erreur'}`);
+    }
+  }
+
+  try {
+    const result = await callVercelGateway(system, prompt, action);
+    return Response.json({ ...result, fallback: true });
+  } catch (error) {
+    failures.push(`gateway:${error instanceof Error ? error.message : 'erreur'}`);
+  }
+
+  console.error('[Julia] Tous les fournisseurs IA ont échoué :', failures);
+  return Response.json(
+    {
+      error:
+        "Julia a essayé Gemini, Groq et Vercel AI Gateway sans obtenir de réponse. Relancez la demande : tous les fournisseurs seront retentés automatiquement.",
+    },
+    { status: 503 },
+  );
 }
